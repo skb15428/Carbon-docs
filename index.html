@@ -45,7 +45,7 @@ const doc=on=>'<svg viewBox="0 0 14 16" aria-hidden="true"><path d="M2 1.5h6.5L1
 const arrow=d=>'<svg viewBox="0 0 20 20" aria-hidden="true"><path d="'+(d<0?'M12.5 4 6.5 10l6 6':'M7.5 4l6 6-6 6')+'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 let B=null,FLAT=[],active=null;
 const store={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
-const label=n=>/^\d+$/.test(n)?'Topic '+n:'Case study '+n;
+const label=n=>/^[CL]\d/i.test(n)?'Case study '+n:'Topic '+n;
 const hashOf=t=>'#'+B.code+'-'+t.n.toLowerCase();
 const countV=v=>v.modules.reduce((a,m)=>a+m.topics.length,0);
 const pagesV=v=>v.modules.reduce((a,m)=>a+m.topics.filter(t=>B.pages[t.n]).length,0);
