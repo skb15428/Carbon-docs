@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carbon Docs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/lesson.css">
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body id="carbonShell">
+<header class="appbar">
+ <button class="iconbtn menu-btn" id="menuBtn" type="button" aria-label="Show topics" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+ <a class="logo" id="logo" href="#"><svg viewBox="0 0 26 26" aria-hidden="true"><path d="M13 3 23 8.5 13 14 3 8.5Z" fill="#3e5a86" stroke="#9cc3f5" stroke-width="1.1" stroke-linejoin="round"/><path d="M3 8.5V18L13 23.5V14Z" fill="#2d4466" stroke="#9cc3f5" stroke-width="1.1" stroke-linejoin="round"/><path d="M23 8.5V18L13 23.5V14Z" fill="#223552" stroke="#9cc3f5" stroke-width="1.1" stroke-linejoin="round"/></svg><span>Carbon <em>Docs</em></span></a>
+ <div class="switch">
+  <button id="bookBtn" type="button" aria-haspopup="listbox" aria-expanded="false"><svg viewBox="0 0 18 18" aria-hidden="true"><rect x="2.5" y="1.5" width="13" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 1.5v15" stroke="currentColor" stroke-width="1.5"/></svg><span id="bookName">Book</span><span class="car">▼</span></button>
+  <div class="bookmenu" id="bookMenu" role="listbox" aria-label="Books" hidden></div>
+ </div>
+ <span class="spacer"></span>
+ <div class="me"><span class="av" aria-hidden="true">SB</span><span class="who"><small>notes by</small><b>Saurabh Baviskar</b></span></div>
+</header>
+<div class="shell">
+ <aside class="side" id="side" aria-label="Topics">
+  <div class="sidesearch"><label><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="7.5" cy="7.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12 12 4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><input id="q" type="search" placeholder="Search topics…" autocomplete="off" aria-label="Search topics"><kbd>⌘K</kbd></label></div>
+  <div class="treehead"><span><svg viewBox="0 0 34 28" aria-hidden="true"><path d="M2 6a2.5 2.5 0 0 1 2.5-2.5h8l3 3.2h14A2.5 2.5 0 0 1 32 9.2V23a2.5 2.5 0 0 1-2.5 2.5h-25A2.5 2.5 0 0 1 2 23Z" fill="#ece7de"/></svg>Volumes</span><small id="tcount"></small></div>
+  <nav id="tree"></nav>
+  <p class="nomatch" id="nomatch">No topic matches that search.</p>
+  <div class="sidefoot">Notes by <b>Saurabh Baviskar</b></div>
+ </aside>
+ <div class="backdrop" id="backdrop"></div>
+ <main class="main" id="main"></main>
+</div>
+
+<script src="system-design/book.js"></script>
+<script>
+{
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const BOOKS=Object.values(window.BOOKS||{});
+const COLS=['#d9a35b','#9a86e6','#5b9be0','#e06b8b','#8fbf6a','#5bc4b0'];
+const folder=c=>'<svg viewBox="0 0 34 28" aria-hidden="true"><path d="M2 6a2.5 2.5 0 0 1 2.5-2.5h8l3 3.2h14A2.5 2.5 0 0 1 32 9.2V23a2.5 2.5 0 0 1-2.5 2.5h-25A2.5 2.5 0 0 1 2 23Z" fill="'+c+'" opacity=".92"/><path d="M2 10.5h30" stroke="#1c1b19" stroke-opacity=".35"/></svg>';
+const doc=on=>'<svg viewBox="0 0 14 16" aria-hidden="true"><path d="M2 1.5h6.5L12 5v9.5H2Z" fill="'+(on?'#2a3320':'none')+'" stroke="'+(on?'#a8c872':'#5f5b55')+'" stroke-width="1.2" stroke-linejoin="round"/><path d="M8.5 1.5V5H12" fill="none" stroke="'+(on?'#a8c872':'#5f5b55')+'" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+const arrow=d=>'<svg viewBox="0 0 20 20" aria-hidden="true"><path d="'+(d<0?'M12.5 4 6.5 10l6 6':'M7.5 4l6 6-6 6')+'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+let B=null,FLAT=[],active=null;
+const store={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+const label=n=>/^\d+$/.test(n)?'Topic '+n:'Case study '+n;
+const hashOf=t=>'#'+B.code+'-'+t.n.toLowerCase();
+const countV=v=>v.modules.reduce((a,m)=>a+m.topics.length,0);
+const pagesV=v=>v.modules.reduce((a,m)=>a+m.topics.filter(t=>B.pages[t.n]).length,0);
+
+function useBook(b){
+ B=b;FLAT=[];
+ B.volumes.forEach((v,vi)=>v.modules.forEach(m=>m.topics.forEach(t=>FLAT.push({t,v,vi,m}))));
+ $('bookName').textContent=B.title;$('logo').href='#'+B.code;
+ $('tcount').textContent=FLAT.length+' topics';
+ store.set('carbon:book',B.id);
+ $('bookMenu').innerHTML='<p>Books</p>'+BOOKS.map(b=>{const n=b.volumes.reduce((k,v)=>k+countV(v),0);return '<button type="button" role="option" data-b="'+esc(b.id)+'" aria-selected="'+(b===B)+'">'+esc(b.title)+'<small>'+b.volumes.length+' volumes · '+n+' topics</small></button>'}).join('');
+ $('tree').innerHTML=B.volumes.map((v,vi)=>{const p=pagesV(v);
+  const tps=ts=>ts.map(t=>{const has=!!B.pages[t.n];return '<a class="tp'+(has?' has':'')+'" href="'+hashOf(t)+'" data-id="'+esc(t.n)+'">'+doc(has)+'<span class="tn">'+esc(t.n)+'</span><span>'+esc(t.t)+'</span></a>'}).join('');
+  return '<details class="tv" data-v="'+vi+'"><summary><span class="chev">›</span>'+folder(COLS[vi%COLS.length])+'<span class="vt"><i>'+String(vi+1).padStart(2,'0')+'.</i>'+esc(v.title)+'</span><span class="cnt'+(p?' has':'')+'">'+(p?p+(p===1?' page':' pages'):countV(v))+'</span></summary><div class="kids">'+
+   v.modules.map(m=>m.title?'<details class="tm"><summary><span class="chev">›</span><span><span class="mid">'+esc(m.id)+'</span> '+esc(m.title)+'</span></summary><div class="kids">'+tps(m.topics)+'</div></details>':tps(m.topics)).join('')+'</div></details>'}).join('');
+ $('q').value='';filter();
+}
+
+/* ---------- main views ---------- */
+function overview(){
+ setMain(false);document.title=B.title+' · Carbon Docs';
+ const pages=FLAT.filter(x=>B.pages[x.t.n]);
+ $('main').innerHTML='<section class="ovhero grid-bg"><p class="crumb">Carbon Docs / '+esc(B.title)+'</p><h1>'+esc(B.title)+'</h1><p class="sub">'+esc(B.blurb)+'</p><div class="chips"><span class="c1">'+B.volumes.length+' volumes</span><span class="c2">'+FLAT.length+' topics</span><span class="c3">'+pages.length+(pages.length===1?' page':' pages')+' written</span></div></section>'+
+ '<section class="ovbody"><h2>Pages</h2><p class="hint">Each finished topic gets a page: animations, key points and interview questions.</p><div class="cards">'+
+ (pages.length?pages.map(x=>'<a class="card" href="'+hashOf(x.t)+'"><span class="k">'+esc(label(x.t.n))+' · '+esc(x.v.name)+'</span><h2>'+esc(x.t.t)+'</h2><p>'+esc(x.t.c)+'</p><span class="open">Open page →</span></a>').join(''):'<p class="hint">No pages yet.</p>')+
+ '</div><h2>Volumes</h2><p class="hint">Pick a volume to see all its topics.</p><div class="cards two">'+
+ B.volumes.map((v,vi)=>{const p=pagesV(v);return '<a class="card" href="#'+B.code+'-v'+(vi+1)+'">'+folder(COLS[vi%COLS.length])+'<span class="k">'+esc(v.name)+'</span><h2>'+esc(v.title)+'</h2><span class="meta">'+esc(v.range)+' · '+countV(v)+' topics'+(p?' · <b>'+p+(p===1?' page':' pages')+'</b>':'')+'</span></a>'}).join('')+'</div></section>';
+ markActive(null);
+}
+function volume(vi){
+ const v=B.volumes[vi];setMain(false);document.title=v.name+': '+v.title+' · Carbon Docs';
+ $('main').innerHTML='<section class="ovhero grid-bg"><p class="crumb">'+esc(B.title)+' / '+esc(v.name)+'</p><h1>'+esc(v.title)+'</h1><p class="sub">'+esc(v.range)+' · '+countV(v)+' topics. Topics with a page are highlighted.</p></section><section class="vview">'+
+ v.modules.map(m=>(m.title?'<h3 class="modh">'+esc((m.id?m.id+' ':'')+m.title)+'</h3>':'')+'<div class="list">'+m.topics.map(t=>{const on=!!B.pages[t.n];return '<a class="row'+(on?' on':'')+'" href="'+hashOf(t)+'"><span class="n">'+esc(t.n)+'</span><span class="t">'+esc(t.t)+'</span>'+(t.c?'<span class="c">'+esc(t.c)+'</span>':'')+(on?'<span class="open">Open →</span>':'')+'</a>'}).join('')+'</div>').join('')+'</section>';
+ markActive(null);openVol(vi);
+}
+function topic(i){
+ const x=FLAT[i],t=x.t,pg=B.pages[t.n],prev=FLAT[i-1],next=FLAT[i+1];
+ document.title=t.t+' · Carbon Docs';
+ const nav=(o,d)=>o?'<a class="iconbtn" href="'+hashOf(o.t)+'" aria-label="'+(d<0?'Previous':'Next')+' topic: '+esc(o.t.t)+'" title="'+esc(o.t.t)+'">'+arrow(d)+'</a>':'<span class="iconbtn" aria-disabled="true">'+arrow(d)+'</span>';
+ const bar='<div class="pagebar">'+nav(prev,-1)+'<span class="pc"><b>'+esc(label(t.n))+'</b> · '+esc(x.v.name)+(x.m.title?' · '+esc((x.m.id?x.m.id+' ':'')+x.m.title):'')+'</span>'+nav(next,1)+'</div>';
+ if(pg){setMain(true);$('main').innerHTML=bar+'<iframe class="pageframe" src="'+esc(B.base+pg)+'" title="'+esc(t.t)+'"></iframe>'}
+ else{setMain(false);$('main').innerHTML=bar+'<section class="stub"><p class="crumb">'+esc(B.title)+' / '+esc(x.v.name)+': '+esc(x.v.title)+'</p><h1 style="font-size:clamp(28px,4vw,42px)">'+esc(t.t)+'</h1>'+(t.c?'<p class="sub">'+esc(t.c)+'</p>':'')+'<div class="box"><b>Not written yet</b><p>This topic gets its page after we learn it: subtopics with animations, a voice interview, then the page appears here.</p></div><div class="nav2">'+(prev?'<a class="btn" href="'+hashOf(prev.t)+'" style="display:inline-flex;align-items:center">← '+esc(prev.t.n)+'</a>':'')+(next?'<a class="btn pri" href="'+hashOf(next.t)+'" style="display:inline-flex;align-items:center">Next: '+esc(next.t.t)+' →</a>':'')+'</div></section>'}
+ markActive(t.n);
+}
+function setMain(framed){const m=$('main');m.classList.toggle('framed',framed);m.scrollTop=0}
+
+/* ---------- tree state ---------- */
+function openVol(vi){document.querySelectorAll('#tree .tv').forEach(d=>{if(+d.dataset.v===vi)d.open=true})}
+function markActive(id){
+ active=id;let el=null;
+ document.querySelectorAll('#tree .tp').forEach(a=>{if(id!==null&&a.dataset.id===id){a.setAttribute('aria-current','page');el=a}else a.removeAttribute('aria-current')});
+ if(el){let p=el.parentElement;while(p&&p.id!=='tree'){if(p.tagName==='DETAILS')p.open=true;p=p.parentElement}
+  el.scrollIntoView({block:'nearest'})}
+}
+function filter(){
+ const q=$('q').value.trim().toLowerCase();let hits=0;
+ document.querySelectorAll('#tree .tp').forEach(a=>{const ok=!q||a.textContent.toLowerCase().includes(q);a.hidden=!ok;if(ok)hits++});
+ document.querySelectorAll('#tree details').forEach(d=>{const any=[...d.querySelectorAll('.tp')].some(a=>!a.hidden);d.hidden=!!q&&!any;if(q)d.open=any});
+ if(!q){document.querySelectorAll('#tree details').forEach(d=>d.open=false);if(active!==null)markActive(active);else{openVol(0);document.querySelectorAll('#tree .tv[open] .tm').forEach(d=>{if(d.querySelector('.tp.has'))d.open=true})}}
+ $('nomatch').style.display=q&&!hits?'block':'none'}
+
+/* ---------- routing ---------- */
+function route(){
+ const h=location.hash.slice(1).toLowerCase(),m=h.match(/^([a-z]+)(?:-(.+))?$/);
+ if(m){const b=BOOKS.find(x=>x.code===m[1]);if(b&&b!==B)useBook(b)}
+ const rest=m&&m[1]===B.code?m[2]:null;
+ if(rest&&/^v\d+$/.test(rest)&&B.volumes[+rest.slice(1)-1])volume(+rest.slice(1)-1);
+ else if(rest){const i=FLAT.findIndex(x=>x.t.n.toLowerCase()===rest);if(i>=0)topic(i);else overview()}
+ else overview();
+ drawer(false)}
+
+/* ---------- controls ---------- */
+function drawer(on){document.body.classList.toggle('drawer',on);$('menuBtn').setAttribute('aria-expanded',String(on))}
+function menu(on){$('bookMenu').hidden=!on;$('bookBtn').setAttribute('aria-expanded',String(on))}
+$('menuBtn').addEventListener('click',()=>drawer(!document.body.classList.contains('drawer')));
+$('backdrop').addEventListener('click',()=>drawer(false));
+$('bookBtn').addEventListener('click',e=>{e.stopPropagation();menu($('bookMenu').hidden)});
+$('bookMenu').addEventListener('click',e=>{const b=e.target.closest('[data-b]');if(!b)return;const bk=BOOKS.find(x=>x.id===b.dataset.b);menu(false);if(bk){if(bk!==B)useBook(bk);location.hash=bk.code}});
+document.addEventListener('click',e=>{if(!e.target.closest('.switch'))menu(false)});
+$('q').addEventListener('input',filter);
+document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();drawer(true);$('q').focus()}if(e.key==='Escape'){menu(false);drawer(false)}});
+addEventListener('hashchange',route);
+
+const saved=BOOKS.find(b=>b.id===store.get('carbon:book'));
+useBook(saved||BOOKS[0]);route();
+}
+</script>
+</body>
+</html>

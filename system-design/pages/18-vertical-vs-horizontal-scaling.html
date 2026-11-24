@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vertical vs horizontal scaling</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../../assets/lesson.css">
+</head>
+<body>
+<div class="topbar"><a href="../../index.html#sd-18">← Carbon Docs</a><span>System Design</span></div>
+<header class="hero band" id="top">
+ <div class="wrap">
+  <p class="crumb">System Design / Volume 1: Fundamentals / 1.5 From one server to many / Topic 18</p>
+  <h1>Vertical vs horizontal scaling</h1>
+  <p class="sub">When one server can't keep up, you either buy a bigger machine (scale up) or add more machines that share the work (scale out). This page covers both, plus everything that breaks when you scale out: sessions, the database and sudden spikes.</p>
+  <div class="chips"><span class="c1">7 subtopics</span><span class="c2" id="nSteps">steps</span><span class="c3" id="nQs">questions</span></div>
+  <div class="heroes">
+   <div class="mini"><h3>Scale up: one bigger machine</h3><p>Simple, no code changes, but has a ceiling and a single point of failure.</p><div data-scene="heroUp"></div></div>
+   <div class="mini"><h3>Scale out: more machines</h3><p>No ceiling and survives failures, but servers must be stateless.</p><div data-scene="heroOut"></div></div>
+  </div>
+  <p class="note">Numbers in the scenes are illustrative, picked to keep the maths easy.</p>
+ </div>
+</header>
+
+<nav class="toc" aria-label="Sections"><div class="scroll">
+ <a href="#summary">Summary</a><a href="#overload">1 Overload</a><a href="#scale-up">2 Scale up</a><a href="#scale-out">3 Scale out</a><a href="#stateless">4 Stateless</a><a href="#database">5 Database</a><a href="#autoscaling">6 Autoscaling</a><a href="#ladder">7 Interview ladder</a><a href="#calculator">Calculator</a><a href="#questions">Questions</a><a href="#cheat-sheet">Cheat sheet</a>
+</div></nav>
+
+<section class="band" id="summary">
+ <div class="wrap">
+  <h2>The whole topic on one screen</h2>
+  <div class="cols2">
+   <div class="scroll">
+    <table class="stack">
+     <thead><tr><th></th><th>Scale up (vertical)</th><th>Scale out (horizontal)</th></tr></thead>
+     <tbody>
+      <tr><th>How you grow</th><td>Move to a bigger machine: more CPU, memory, disk</td><td>Add more identical machines behind a load balancer</td></tr>
+      <tr><th>Code changes</th><td>None</td><td>Servers must be stateless (sessions in Redis or JWTs)</td></tr>
+      <tr><th>Limit</th><td>The biggest machine that exists</td><td>No practical limit</td></tr>
+      <tr><th>A machine fails</th><td>Everything is down</td><td>The others keep serving</td></tr>
+      <tr><th>Growing</th><td>Stop, resize, restart: minutes of downtime</td><td>Add servers live, no downtime</td></tr>
+      <tr><th>Cost</th><td>Grows with each size; top sizes cost a premium</td><td>Many cheap machines, added in small steps</td></tr>
+      <tr><th>New problems</th><td>Few</td><td>Load balancer, shared state, database bottleneck, more to operate</td></tr>
+      <tr><th>Best for</th><td>Early stage, quick fixes, the primary database</td><td>Stateless app servers, big or spiky traffic</td></tr>
+     </tbody>
+    </table>
+   </div>
+   <div>
+    <h3 style="font-size:20px;margin-bottom:6px">If you remember nothing else</h3>
+    <ol class="oneline">
+     <li>Scale up first for speed; design to scale out because of the ceiling and the single point of failure.</li>
+     <li>Plan peak at 60–70% busy per server, plus one spare (N+1).</li>
+     <li>Make servers stateless before scaling out: sessions go to Redis or into JWTs.</li>
+     <li>More app servers move the bottleneck to the database: pooler, cache, then read replicas.</li>
+     <li>Autoscaling lags by minutes: pre-scale known spikes; scale out fast and in slowly.</li>
+    </ol>
+   </div>
+  </div>
+  <h3 style="font-size:20px;margin-top:30px">How to answer any scaling question</h3>
+  <div class="frame">
+   <div><b>1. Cause</b><span>What is actually overloaded, and why.</span></div>
+   <div><b>2. Fix</b><span>What you would change, in order.</span></div>
+   <div><b>3. Trade-off</b><span>What the fix costs or breaks.</span></div>
+   <div><b>4. Number</b><span>A quick estimate: servers, connections, minutes.</span></div>
+  </div>
+  <p class="trap"><b>Common trap:</b> explaining the cause well and then stopping. Always finish with the fix and the reason it works. Interviewers care more about the fix than the cause.</p>
+ </div>
+</section>
+
+<section class="band topic" id="overload">
+ <div class="wrap">
+  <p class="num">Subtopic 1 of 7</p>
+  <h2>Overload, queueing and headroom</h2>
+  <p class="lede">Why a server gets slow long before it's “full”, what users see when it is full, and how much spare capacity to keep.</p>
+  <div class="scene" data-scene="overload"></div>
+  <div class="remember"><h3>Remember</h3><ul>
+   <li>Utilisation = requests per second ÷ capacity (200 ÷ 1,000 = 20%).</li>
+   <li>Waiting grows like busy ÷ (1 − busy): ×1.5 at 60%, ×9 at 90%, ×19 at 95%. Latency shoots up near the limit.</li>
+   <li>Above 100% the queue grows forever: <b>504</b> when requests time out, <b>503</b> when the server refuses them. Retries make it worse.</li>
+   <li>Plan normal peak at <b>60–70%</b> busy, keeping 30–40% headroom for bursts, retries, deploys and failures.</li>
+   <li>When overloaded, fail fast with 503s (load shedding) instead of letting everyone time out.</li>
+  </ul></div>
+  <details class="code"><summary>Python: how waiting grows with load</summary><div class="codebar"><button class="btn copy" type="button">Copy</button></div><pre><code><span class="c"># How long a request waits, as a multiple of the work time (M/M/1 queue)</span>
+def wait_factor(busy):
+    if busy &gt;= 1:
+        return float("inf")   <span class="c"># arrivals beat capacity: the queue grows forever</span>
+    return busy / (1 - busy)
+
+for busy in (0.2, 0.6, 0.7, 0.85, 0.9, 0.95):
+    print(f"{busy:.0%} busy -&gt; wait x{wait_factor(busy):.1f}")
+<span class="c"># 20% x0.2 | 60% x1.5 | 70% x2.3 | 85% x5.7 | 90% x9.0 | 95% x19.0</span></code></pre></details>
+ </div>
+</section>
+
+<section class="band topic" id="scale-up">
+ <div class="wrap">
+  <p class="num">Subtopic 2 of 7</p>
+  <h2>Vertical scaling: a bigger machine</h2>
+  <p class="lede">The quickest fix, and the three walls you hit with it: the ceiling, the single point of failure, and downtime.</p>
+  <div class="scene" data-scene="up"></div>
+  <div class="remember"><h3>Remember</h3><ul>
+   <li>Vertical scaling (scaling up) = the same app on a bigger machine: more cores, memory, faster disks.</li>
+   <li>Advantages: no code changes, nothing new to run, fastest first fix. Great for databases.</li>
+   <li>Limits: a hard <b>ceiling</b> (the biggest machine), rising cost, a <b>single point of failure</b>, and <b>downtime</b> on every resize.</li>
+   <li>A 2× bigger machine is often less than 2× faster (locks, single-threaded code, memory bandwidth).</li>
+   <li>Interview line: “Scale up first for speed, but design to scale out.”</li>
+  </ul></div>
+ </div>
+</section>
+
+<section class="band topic" id="scale-out">
+ <div class="wrap">
+  <p class="num">Subtopic 3 of 7</p>
+  <h2>Horizontal scaling: more machines</h2>
+  <p class="lede">A load balancer spreads requests across identical servers. Health checks route around failures, N+1 keeps a spare, and the load balancer itself needs a backup.</p>
+  <div class="scene" data-scene="out"></div>
+  <div class="remember"><h3>Remember</h3><ul>
+   <li>Horizontal scaling (scaling out) = more identical servers behind a <b>load balancer</b>.</li>
+   <li>Advantages: no ceiling, small cheap steps, survives a server dying.</li>
+   <li>Load balancer picks a server by <b>round robin</b>, <b>least connections</b> or hashing; <b>health checks</b> remove dead servers within seconds.</li>
+   <li><b>N+1</b>: servers = ceil(peak ÷ (capacity × 0.7)) + 1. 14,000/s at 1,000 each → 20 + 1 = 21.</li>
+   <li>The load balancer must be redundant: an active–passive pair sharing a <b>floating IP</b> with heartbeats, or a managed one (AWS ELB).</li>
+   <li>Costs: servers must be stateless, the shared database becomes the bottleneck, more to deploy and monitor.</li>
+  </ul></div>
+  <details class="code"><summary>Python: servers needed and a round-robin load balancer</summary><div class="codebar"><button class="btn copy" type="button">Copy</button></div><pre><code>import math, itertools
+
+def servers_needed(peak_rps, per_server=1000, target=0.70, spare=1):
+    <span class="c">"""Servers to run so peak sits at `target` busy, plus spares (N+1)."""</span>
+    safe = per_server * target                <span class="c"># 1,000 * 0.7 = 700 requests/s</span>
+    return math.ceil(peak_rps / safe) + spare
+
+print(servers_needed(14_000))   <span class="c"># 20 + 1 = 21</span>
+print(servers_needed(6_000))    <span class="c"># 9 + 1 = 10</span>
+print(servers_needed(2_400))    <span class="c"># 4 + 1 = 5</span>
+
+class LoadBalancer:
+    <span class="c">"""Round robin that skips servers failing their health check."""</span>
+    def __init__(self, servers):
+        self.servers = list(servers)
+        self.healthy = set(self.servers)
+        self._next = itertools.cycle(self.servers)
+
+    def health_check(self, server, ok):
+        if ok:
+            self.healthy.add(server)
+        else:
+            self.healthy.discard(server)
+
+    def pick(self):
+        for _ in range(len(self.servers)):
+            server = next(self._next)
+            if server in self.healthy:
+                return server
+        raise RuntimeError("503: no healthy servers")
+
+lb = LoadBalancer(["s1", "s2", "s3"])
+lb.health_check("s2", ok=False)
+print([lb.pick() for _ in range(4)])   <span class="c"># ['s1', 's3', 's1', 's3']</span></code></pre></details>
+ </div>
+</section>
+
+<section class="band topic" id="stateless">
+ <div class="wrap">
+  <p class="num">Subtopic 4 of 7</p>
+  <h2>Stateless servers and sessions</h2>
+  <p class="lede">Why users get logged out at random after you add servers, why sticky sessions are a trap, and the two real fixes.</p>
+  <div class="scene" data-scene="stateless"></div>
+  <div class="remember"><h3>Remember</h3><ul>
+   <li>Sessions in each server's memory + a load balancer = <b>random logouts</b>: the next request lands on a server that doesn't know the user.</li>
+   <li><b>Sticky sessions</b> are a patch: a crash or deploy logs out everyone on that server, and load becomes uneven.</li>
+   <li>Fix 1: a shared session store (<b>Redis</b>, with a replica and TTLs). Fix 2: signed tokens (<b>JWT</b>), short expiry plus refresh token.</li>
+   <li><b>Stateless</b> servers keep nothing between requests, so any server can serve any request. This is what makes autoscaling and rolling deploys safe.</li>
+   <li>Files go to object storage (S3), not the server's disk.</li>
+  </ul></div>
+  <details class="code"><summary>Python: sessions in Redis</summary><div class="codebar"><button class="btn copy" type="button">Copy</button></div><pre><code>import json, secrets
+import redis   <span class="c"># pip install redis</span>
+
+store = redis.Redis(host="sessions.internal", port=6379)
+
+def login(user_id):
+    session_id = secrets.token_urlsafe(32)
+    store.set(f"session:{session_id}", json.dumps({"user_id": user_id}), ex=3600)
+    return session_id          <span class="c"># sent to the browser in a cookie</span>
+
+def current_user(session_id):
+    data = store.get(f"session:{session_id}")   <span class="c"># any server can do this</span>
+    return json.loads(data)["user_id"] if data else None   <span class="c"># None -&gt; login page</span>
+
+def logout(session_id):
+    store.delete(f"session:{session_id}")       <span class="c"># instant logout everywhere</span></code></pre></details>
+ </div>
+</section>
+
+<section class="band topic" id="database">
+ <div class="wrap">
+  <p class="num">Subtopic 5 of 7</p>
+  <h2>App servers vs the database</h2>
+  <p class="lede">Once app servers scale easily, the one shared database takes the strain. Here's why more servers can make things slower, and the fixes in order.</p>
+  <div class="scene" data-scene="db"></div>
+  <div class="remember"><h3>Remember</h3><ul>
+   <li>Stateless app servers scale easily; the shared database becomes the bottleneck.</li>
+   <li>Database connections = app servers × pool size: 20 × 50 = <b>1,000</b>. Too many connections and concurrent queries make everything slower.</li>
+   <li>Fix order: slow queries and indexes → <b>PgBouncer</b> → <b>cache</b> hot reads (80% hits = 5× fewer reads) → <b>read replicas</b> → scale up the primary → shard.</li>
+   <li><b>Replication lag</b>: a read right after a write can hit a replica that hasn't caught up (the old profile photo).</li>
+   <li>Fix with <b>read-your-own-writes</b>: send a user's reads to the primary for a few seconds after they write.</li>
+   <li>Replicas scale reads, not writes.</li>
+  </ul></div>
+  <details class="code"><summary>Python: cache-aside and read-your-own-writes routing</summary><div class="codebar"><button class="btn copy" type="button">Copy</button></div><pre><code>import json, time
+
+<span class="c"># 1. Cache-aside: check the cache, fall back to the database, then fill the cache</span>
+def get_profile(user_id):
+    key = f"profile:{user_id}"
+    cached = cache.get(key)
+    if cached:
+        return json.loads(cached)                                  <span class="c"># hit: about 1 ms</span>
+    row = replica.query("SELECT * FROM users WHERE id = %s", user_id)  <span class="c"># miss</span>
+    cache.set(key, json.dumps(row), ex=300)                        <span class="c"># keep for 5 minutes</span>
+    return row
+
+<span class="c"># 2. Read your own writes: recent writers read from the primary</span>
+STICKY_SECONDS = 5          <span class="c"># longer than normal replication lag</span>
+last_write = {}             <span class="c"># user_id -&gt; time of last write (keep in Redis in production)</span>
+
+def pick_db(user_id, is_write):
+    if is_write:
+        last_write[user_id] = time.time()
+        return "primary"
+    if time.time() - last_write.get(user_id, 0) &lt; STICKY_SECONDS:
+        return "primary"    <span class="c"># sees their own new photo</span>
+    return "replica"
+
+print(pick_db(42, is_write=True))    <span class="c"># primary (uploads a new photo)</span>
+print(pick_db(42, is_write=False))   <span class="c"># primary (sees the new photo)</span>
+print(pick_db(7, is_write=False))    <span class="c"># replica (everyone else)</span></code></pre></details>
+ </div>
+</section>
+
+<section class="band topic" id="autoscaling">
+ <div class="wrap">
+  <p class="num">Subtopic 6 of 7</p>
+  <h2>Autoscaling and sudden spikes</h2>
+  <p class="lede">The cricket final story: why autoscaling still lets users see errors, how pre-scaling fixes it, and why you scale in slowly.</p>
+  <div class="scene" data-scene="auto"></div>
+  <div class="remember"><h3>Remember</h3><ul>
+   <li><b>Target tracking</b>: keep average CPU near 60–70%; set a minimum (availability) and a maximum (cost).</li>
+   <li>Servers needed = ceil(traffic ÷ (capacity × target)): 15,000 ÷ 650 → 24.</li>
+   <li>Autoscaling reacts <b>after</b> the spike, and a new server needs <b>2–5 minutes</b> to boot and warm up (cold start).</li>
+   <li>Known spikes: <b>pre-scale</b> on a schedule 15–20 minutes early. Keep a warm pool for surprises.</li>
+   <li>While capacity catches up: <b>waiting room</b>, <b>rate limiting</b>, <b>graceful degradation</b>.</li>
+   <li>Scale out fast, scale in slowly: a <b>cooldown</b> stops flapping, and <b>draining</b> lets in-flight requests finish.</li>
+  </ul></div>
+  <details class="code"><summary>Python: a target-tracking autoscaler with a cooldown</summary><div class="codebar"><button class="btn copy" type="button">Copy</button></div><pre><code>import math, time
+
+def desired_servers(rps, per_server=1000, target=0.65, min_n=2, max_n=100):
+    need = math.ceil(rps / (per_server * target))
+    return max(min_n, min(max_n, need))
+
+print(desired_servers(3_000))    <span class="c"># 5</span>
+print(desired_servers(15_000))   <span class="c"># 24</span>
+
+def autoscaler(get_rps, running, start, drain_and_stop, cooldown_s=300):
+    last_scale_in = 0
+    while True:
+        want, have = desired_servers(get_rps()), running()
+        if want &gt; have:
+            start(want - have)                   <span class="c"># scale out: fast, all at once</span>
+        elif want &lt; have and time.time() - last_scale_in &gt; cooldown_s:
+            drain_and_stop(1)                    <span class="c"># scale in: one at a time</span>
+            last_scale_in = time.time()
+        time.sleep(60)</code></pre></details>
+ </div>
+</section>
+
+<section class="band topic" id="ladder">
+ <div class="wrap">
+  <p class="num">Subtopic 7 of 7</p>
+  <h2>The interview ladder: scaling step by step</h2>
+  <p class="lede">When they ask “how would you scale this?”, climb these nine steps in order. At each one say what's overloaded, what you change, and what it costs.</p>
+  <div class="scene" data-scene="ladder"></div>
+  <div class="remember"><h3>Remember the ladder</h3><ul>
+   <li>1 One server → 2 Measure the bottleneck → 3 Scale up → 4 Split app and database → 5 Stateless servers</li>
+   <li>6 Load balancer + N+1 servers → 7 Database becomes the bottleneck → 8 Cache + read replicas → 9 Autoscale + pre-scale</li>
+   <li>After that: sharding, CDN, multiple regions (later lessons).</li>
+  </ul></div>
+ </div>
+</section>
+
+<section class="band topic" id="calculator">
+ <div class="wrap">
+  <h2>How many servers? Work it out</h2>
+  <p class="lede">The same maths as the interview question. Change the numbers or pick a preset.</p>
+  <div class="calc">
+   <div>
+    <label for="cPeak">Peak requests per second<input id="cPeak" type="number" inputmode="numeric" min="1" value="14000"></label>
+    <label for="cPer">One server can handle (requests per second)<input id="cPer" type="number" inputmode="numeric" min="1" value="1000"></label>
+    <label for="cTarget">Plan each server at <output id="cTOut">70%</output> busy<input id="cTarget" type="range" min="50" max="90" step="5" value="70"></label>
+    <label for="cSpare">Spare servers<select id="cSpare"><option value="0">0 (no spare)</option><option value="1" selected>1 (N+1)</option><option value="2">2 (N+2)</option><option value="3">3</option></select></label>
+    <div class="presets" role="group" aria-label="Presets">
+     <button class="chip" type="button" data-p="14000,1000,70,1">Interview: 14,000/s</button>
+     <button class="chip" type="button" data-p="6000,1000,70,1">Drill: 6,000/s</button>
+     <button class="chip" type="button" data-p="2400,1000,70,1">Lesson: 2,400/s</button>
+     <button class="chip" type="button" data-p="15000,1000,65,0">Cricket final at 65%</button>
+    </div>
+   </div>
+   <div class="result" aria-live="polite">
+    <div class="big" id="cOut">21</div><div class="unit">servers to run</div>
+    <p id="cMath"></p><p id="cNorm"></p><p id="cFail"></p>
+    <div class="fleet" id="cFleet" aria-hidden="true"></div>
+   </div>
+  </div>
+ </div>
+</section>
+
+<section class="band topic" id="questions">
+ <div class="wrap">
+  <h2>Interview questions</h2>
+  <p class="lede">Read each question and answer it out loud first. Open it only to check your answer.</p>
+  <div class="qa-tools"><button class="chip" type="button" id="openAll" aria-pressed="false">Show all answers</button></div>
+  <div id="qa"></div>
+ </div>
+</section>
+
+<section class="band topic" id="cheat-sheet">
+ <div class="wrap">
+  <h2>Numbers to know</h2>
+  <div class="tiles">
+   <div><b>60–70%</b><span>Target busy per server at peak</span></div>
+   <div><b>×9</b><span>Wait at 90% busy (busy ÷ (1 − busy))</span></div>
+   <div><b>N+1</b><span>One spare server; per zone at scale</span></div>
+   <div><b>÷ 0.7, +1</b><span>Servers = ceil(peak ÷ (capacity × 0.7)) + 1</span></div>
+   <div><b>503 · 504</b><span>Refused (overloaded) · timed out</span></div>
+   <div><b>Seconds</b><span>Health checks and load balancer failover</span></div>
+   <div><b>2–5 min</b><span>Cold start: boot plus warm-up</span></div>
+   <div><b>15–20 min</b><span>Pre-scale before a known spike</span></div>
+   <div><b>~5 min</b><span>Cooldown between scale-in steps</span></div>
+   <div><b>20 × 50</b><span>Servers × pool size = 1,000 DB connections</span></div>
+   <div><b>80% hits</b><span>Cache → 5× fewer database reads</span></div>
+   <div><b>ms → s</b><span>Replica lag: milliseconds, seconds under load</span></div>
+   <div><b>~15 min</b><span>JWT lifetime, plus a refresh token</span></div>
+   <div><b>~1 ms</b><span>A Redis lookup inside the data centre</span></div>
+  </div>
+ </div>
+</section>
+
+<footer class="band foot">
+ <div class="wrap">
+  <p>Topic 18 in System Design, Volume 1. Next: topic 19, stateless services and sessions (partly covered here), and topic 20, load balancers.</p>
+ </div>
+</footer>
+<button class="toTop" id="toTop" type="button" aria-label="Back to top">↑</button>
+
+<script src="../../assets/lesson.js"></script>
+<script>
+{
+const {col,grid,fleetState,r1}=ISO;
+const FL=grid('f',296,142,6,4,1.3);
+const fleet=(on,ghost,tone,extra)=>fleetState(FL,on,ghost,tone,extra);
+const S5=['s1','s2','s3','s4','s5'];
+const SCENES={
+heroUp:{bare:1,vb:[300,176],label:'Users sending requests to one big server',objects:[{id:'c',type:'crowd',x:60,y:126,size:2.1,n:7},{id:'s',type:'server',x:202,y:134,w:2.3,h:3,name:'One bigger machine'}],steps:[{f:[{p:['c','s'],r:5}]}]},
+heroOut:{bare:1,vb:[300,200],label:'Users sending requests through a load balancer to four servers',objects:[{id:'c',type:'crowd',x:42,y:124,size:1.9,n:7},{id:'lb',type:'lb',x:112,y:124,w:1.2,h:.5,t:'purple'},...col('h',212,[64,102,140,178],1,1.25,{name:'',pa:''}),{id:'tg',type:'tag',x:212,y:20}],steps:[{o:{tg:{p:'=Load balancer + many servers'}},f:[{p:['c','lb',['h1','h2','h3','h4']],r:7}]}]},
+
+overload:{vb:[420,205],label:'Users sending requests to one server, with a queue in front of it',
+objects:[{id:'c',type:'crowd',x:76,y:136,size:2.5,n:3,name:'Users'},{id:'q',type:'queue',x:232,y:138,dx:-14,dy:1.1},{id:'s',type:'server',x:290,y:142,w:1.7,h:2.1,name:'Server'}],
+steps:[
+{title:'Light traffic: nobody waits',m:[['Requests/s','200'],['Server busy','20%'],['Wait (p95)','40 ms'],['Errors','0']],o:{c:{n:3},q:{n:0},s:{t:'blue',p:'20% busy'}},f:[{p:['c','s'],r:2}],curve:.2,
+ what:'Each request takes about 1 ms of work, so this server can finish about <b>1,000 requests a second</b>. At 200 a second it is busy only 20% of the time. A new request almost always finds the server free and is answered straight away.',
+ say:'Utilisation is arrival rate divided by capacity: 200 ÷ 1,000 = 20%.',
+ ask:['What does “capacity” mean for a server?','The most requests per second it can finish while still meeting its latency target. You measure it with a load test; you don’t guess.']},
+{title:'Busier: short queues appear',m:[['Requests/s','600'],['Server busy','60%'],['Wait (p95)','70 ms'],['Errors','0']],o:{c:{n:6},q:{n:2},s:{p:'60% busy'}},f:[{p:['c','s'],r:5}],curve:.6,
+ what:'Requests don’t arrive evenly; they come in bursts. At 60% busy a burst sometimes lands while the server is mid-request, so a few requests wait in a <b>queue</b> (the small blocks in front of the server). Each waits only a moment, so users don’t notice.',
+ say:'Below about 70% busy, queues stay short and latency stays flat.',
+ ask:['Why does a queue form if the server isn’t 100% busy?','Because arrivals are random. Some moments get several requests at once, and they have to wait their turn.']},
+{title:'Danger zone: waiting grows fast',m:[['Requests/s','850'],['Server busy','!85%'],['Wait (p95)','!250 ms'],['Errors','0']],o:{c:{n:9},q:{n:6},s:{p:'85% · danger',pt:'red'}},f:[{p:['c','s'],r:7}],curve:.85,
+ what:'Going from 60% to 85% busy is only 40% more traffic, but the average wait almost <b>quadruples</b>. Queueing maths says waiting grows like busy ÷ (1 − busy): 1.5 at 60%, 5.7 at 85%, 19 at 95%. Near the limit every small burst builds a long queue that takes ages to drain.',
+ say:'Latency doesn’t grow in a straight line with load; it shoots up as utilisation nears 100%. That’s why I never plan to run servers near their limit.',
+ ask:['Is 90% CPU safe if the server isn’t failing yet?','No. At 90% requests wait about 9× their work time, p95 is already bad, and any spike or a failed server tips it over. Target 60–70% at peak.']},
+{title:'Past capacity: errors',m:[['Requests/s','1,200'],['Server busy','!100%'],['Wait (p95)','!timeouts'],['Errors','!17%']],o:{c:{n:13},q:{n:9,t:'red'},s:{t:'red',p:'overloaded'}},f:[{p:['c','s'],r:9,x:.3}],curve:.99,
+ what:'Now 1,200 requests arrive each second but only 1,000 finish. The extra 200 a second pile up, so the queue grows without end. Requests that wait too long hit a timeout and the load balancer returns <b>504 Gateway Timeout</b>. When the queue is full the server refuses new work with <b>503 Service Unavailable</b>. Users retry, which adds even more load.',
+ say:'Above capacity the queue grows forever: requests time out with 504s or get refused with 503s, and client retries make it worse.',
+ ask:['What should an overloaded server do?','Fail fast: reject the extra requests quickly with 503 (load shedding) instead of letting everyone time out, and have clients retry with backoff.']},
+{title:'Headroom: plan for 60–70%',m:[['Safe max','700/s'],['Plan busy at','70%'],['Wait (p95)','80 ms'],['Errors','0']],o:{c:{n:7},q:{n:1,t:'blue'},s:{t:'blue',p:'70% · safe line',pt:''}},f:[{p:['c','s'],r:6}],curve:.7,
+ what:'<b>Headroom</b> is spare capacity kept for bursts, retries, deploys and a server failing. The rule of thumb: plan so normal peak keeps each server at 60–70% busy. For a 1,000/s server, treat <b>700/s</b> as its real limit; the other 30% is your safety margin.',
+ say:'I size for peak at about 70% utilisation, so a server that can do 1,000 a second is planned at 700.',
+ ask:['What is headroom?','Spare capacity above the expected peak, kept for bursts, retries, deploys and losing a server. Usually 30–40%.']}
+]},
+
+up:{vb:[420,236],label:'Users sending requests to a single server that grows bigger',
+objects:[{id:'c',type:'crowd',x:72,y:166,size:2.4,n:8,name:'Users'},{id:'s',type:'server',x:274,y:172,w:1.3,h:1.5,name:'Server'}],
+steps:[
+{title:'One small server, nearly full',m:[['Machine','4 cores · 16 GB'],['Capacity','1,000/s'],['Cost','1×'],['Busy','!90%']],o:{s:{w:1.3,d:1.3,h:1.5,t:'red',p:'90% busy'}},f:[{p:['c','s'],r:7}],
+ what:'Our app runs on one machine with 4 CPU cores and 16 GB of memory. Traffic has grown to 900 requests a second, so it is 90% busy and slow at peak. We need more capacity.',
+ say:'First I’d measure what is actually maxed out (CPU, memory, disk or the database) before choosing a fix.',
+ ask:['What would you check first?','CPU, memory, disk I/O and p95 latency on the server, plus the database’s load, to find the real bottleneck.']},
+{title:'Scale up: move to a bigger machine',m:[['Machine','16 cores · 64 GB'],['Capacity','4,000/s'],['Cost','about 4×'],['Busy','23%']],o:{s:{w:1.9,d:1.9,h:2.2,t:'blue',p:'23% busy'}},
+ what:'<b>Vertical scaling</b> (scaling up) means moving the same app to a bigger machine: more cores, more memory, faster disks. In the cloud it is often just choosing a larger instance size and restarting. Nothing in the code changes, so it is the quickest first fix. 900 ÷ 4,000 ≈ 23% busy.',
+ say:'Scaling up is the fastest first move: no code changes, no new moving parts, and everything still lives in one place.',
+ ask:['What is the big advantage of vertical scaling?','Simplicity: no code changes, no load balancer, no shared-state problems. Good for an early product and for databases.']},
+{title:'Again and again, until the biggest box',m:[['Machine','largest size'],['Capacity','~20×'],['Cost','!very high'],['Next size up','!none']],o:{s:{w:2.5,d:2.5,h:3,p:'largest size'}},
+ what:'Traffic keeps growing, so we keep upgrading. But every cloud has a largest machine and you can’t buy a bigger one: that is the <b>ceiling</b>. Prices also rise with every size, and the very biggest specialised machines cost a premium. A bigger machine never makes you more reliable.',
+ say:'Vertical scaling has a hard ceiling, the biggest machine that exists, and gets expensive at the top end.',
+ ask:['Is a 2× bigger machine always 2× faster?','No. Code with locks or single-threaded parts can’t use the extra cores, and memory and network bandwidth don’t always double, so gains are often below 2×.']},
+{title:'Single point of failure',m:[['Machines','1'],['Capacity','!0'],['Cost','very high'],['Errors','!100%']],o:{s:{dead:1,p:'crashed'}},f:[{p:['c','s'],r:7}],
+ what:'However big it is, it is still one machine. If it crashes, a disk dies or its data centre has a problem, the whole product goes down and every request fails. One machine is a <b>single point of failure</b>.',
+ say:'One machine means one failure takes everything down, so a single server can never be highly available.',
+ ask:['How would you remove this single point of failure?','Run at least two servers behind a load balancer, ideally in different availability zones, so one can fail while the other serves.']},
+{title:'Every upgrade means downtime',m:[['Resize','stop → resize → start'],['Downtime','!minutes'],['Users','!all offline'],['Errors','!100%']],o:{s:{dead:0,g:1,p:'resizing…'}},f:[],
+ what:'To move to a bigger size you usually stop the machine, change its instance type and start it again. That is minutes of downtime each time. A single app server simply goes offline while it happens.',
+ say:'Every resize is a planned outage unless a second machine can take the traffic.',
+ ask:['How do you resize without downtime?','Keep a second machine: upgrade the standby, switch traffic to it, then upgrade the old one. That is already a step towards horizontal scaling.']},
+{title:'When vertical is the right call',m:[['Good for','early stage'],['Also','quick fixes'],['Also','databases'],['Then','scale out']],o:{s:{g:0,t:'blue',w:2.1,d:2.1,h:2.5,p:'scale up first'}},f:[{p:['c','s'],r:6}],
+ what:'Scale up first when you are small, when you need a fix today, or for parts that are hard to split, like the primary database. Many large companies still run their main database on a very big machine. Plan to scale out the app servers.',
+ say:'I’d scale up first because it is quick and needs no code changes, but I’d design to scale out because of the ceiling, the cost and the single point of failure.',
+ ask:['When would you pick vertical over horizontal on purpose?','For a stateful part that is hard to split, such as a primary database, or when traffic is small and simplicity matters more.']}
+]},
+
+out:{vb:[420,320],label:'Users, a load balancer and up to five servers',
+objects:[{id:'c',type:'crowd',x:50,y:184,size:2.3,n:8,name:'Users'},{id:'lb',type:'lb',x:140,y:184,w:1.5,h:.6,t:'purple',name:'Load balancer',pb:1},{id:'lb2',type:'lb',x:140,y:268,w:1.5,h:.6,t:'purple',name:'LB 2',off:1},...col('s',248,[66,114,162,210,258],1.15,1.4)],
+steps:[
+{title:'Add a load balancer and a second server',m:[['Servers','2'],['Capacity','2,000/s'],['Traffic','1,200/s'],['Each server','60%']],o:{s1:{p:'60%'},s2:{p:'60%'},s3:false,s4:false,s5:false},f:[{p:['c','lb',['s1','s2']],r:6}],
+ what:'<b>Horizontal scaling</b> (scaling out) means adding more machines that each run the same app. A <b>load balancer</b> sits in front and spreads the requests. With <b>round robin</b> it simply takes turns: S1, S2, S1, S2… Two servers share 1,200 requests a second, so each does 600 (60% busy).',
+ say:'Scaling out adds identical servers behind a load balancer, so capacity grows with every server you add.',
+ ask:['How does the load balancer choose a server?','Round robin (take turns), least connections (the least busy server) or hashing (the same user to the same server). Least connections is better when requests take different amounts of time.']},
+{title:'Need more? Add more servers',m:[['Servers','4'],['Capacity','4,000/s'],['Traffic','2,400/s'],['Each server','60%']],o:{s3:{p:'60%'},s4:{p:'60%'}},f:[{p:['c','lb',['s1','s2','s3','s4']],r:9}],
+ what:'Traffic doubles to 2,400 a second. Instead of a bigger machine we add two more of the same small servers. Capacity grows in a straight line, 4 × 1,000 = 4,000 a second, and each server stays at 60%. There is no real ceiling: add as many as you need.',
+ say:'Horizontal scaling has no practical ceiling, and you add capacity in small, cheap steps.',
+ ask:['Does adding servers always add capacity?','Only if the servers are stateless and nothing behind them, like the database, becomes the bottleneck. That is subtopics 4 and 5.']},
+{title:'Health checks: a server dies',m:[['Healthy','3 of 4'],['Capacity','3,000/s'],['Traffic','2,400/s'],['Each server','!80%']],o:{s1:{p:'80%',pt:'red'},s2:{p:'80%',pt:'red'},s3:{dead:1,p:'down'},s4:{p:'80%',pt:'red'}},f:[{p:['c','lb',['s1','s2','s4']],r:9}],
+ what:'Every few seconds the load balancer calls each server’s <code>/health</code> endpoint. S3 stops answering, so after a couple of failed checks it is marked down and gets no more traffic. Users barely notice. But now 2,400 ÷ 3 = 800 each: 80% busy, above our 70% safe line.',
+ say:'Health checks let the load balancer route around a dead server within seconds.',
+ ask:['Liveness check or readiness check: which does the load balancer use?','Readiness: “can you take traffic right now?” (for example after warm-up). Liveness asks “is the process alive?” and is used to restart it.']},
+{title:'N+1: always keep one spare',m:[['Servers','5 (4 + 1)'],['Capacity','5,000/s'],['Traffic','2,400/s'],['Each server','48%']],o:{s1:{p:'48%',pt:''},s2:{p:'48%',pt:''},s3:{dead:0,p:'48%'},s4:{p:'48%',pt:''},s5:{p:'48%'}},f:[{p:['c','lb',S5],r:9}],
+ what:'Size the fleet so losing any one server still keeps the rest under 70%. Peak 2,400 ÷ 700 safe per server = 3.4, so 4 servers carry the load, plus 1 spare = <b>5</b>. Normally each runs at 48%; if one dies, the other four run at 60%. That is <b>N+1</b>. Across two availability zones, round up so either zone can lose a server.',
+ say:'I size for peak at 70% and add one spare, so a single failure never overloads the rest.',
+ ask:['Peak is 14,000/s, each server does 1,000/s, keep 30% headroom. How many servers?','14,000 ÷ 700 = 20 for the load, plus 1 spare = 21.']},
+{title:'What if the load balancer dies?',m:[['Servers','5 healthy'],['Load balancers','!1 (down)'],['Traffic','2,400/s'],['Errors','!100%']],o:{lb:{dead:1,p:'down'}},f:[{p:['c','lb',S5],r:9}],
+ what:'Everything now flows through one load balancer, so it has become the new <b>single point of failure</b>. If it crashes, all five healthy servers sit idle because no request can reach them.',
+ say:'The load balancer itself must be redundant, or it is just a new single point of failure.',
+ ask:['Why not just restart the load balancer quickly?','Even a 2-minute restart is a full outage. You need a second one that takes over in seconds, automatically.']},
+{title:'Active–passive pair with a floating IP',m:[['Load balancers','2'],['Active','LB 2'],['Switch-over','seconds'],['Errors','0']],o:{lb2:{p:'took over the IP'}},f:[{p:['c','lb2',S5],r:9}],
+ what:'Run two load balancers that share one <b>floating IP</b> address and send each other <b>heartbeats</b> every second. When the active one stops answering, the passive one takes over the IP within seconds and traffic keeps flowing. In the cloud, managed load balancers (like AWS ELB) are already spread across machines and zones. At global scale, DNS spreads users across regions.',
+ say:'Two load balancers share a floating IP with heartbeats, so the standby takes over in seconds; in the cloud I’d use a managed load balancer, which is redundant already.',
+ ask:['What is split brain here?','Both load balancers think the other is dead and both claim the IP. Prevent it with a reliable heartbeat link, a third witness or a lease, so only one can be active.']},
+{title:'The price of scaling out',m:[['Ceiling','none'],['Survives','a server or LB failing'],['Needs','stateless servers'],['Watch','the database']],o:{lb:{dead:0,p:'active'},lb2:{p:'standby'},s1:{p:''},s2:{p:''},s3:{p:''},s4:{p:''},s5:{p:''}},f:[{p:['c','lb',S5],r:9}],
+ what:'Scaling out isn’t free. Servers can no longer keep user data in their own memory (subtopic 4). Every server talks to the same database, which becomes the new bottleneck (subtopic 5). Deploys, logs and monitoring now span many machines, and each request takes an extra network hop through the load balancer.',
+ say:'Scaling out trades simplicity for capacity and reliability: I have to make servers stateless and protect the shared database.',
+ ask:['If horizontal is better, why not always do it?','It needs stateless servers, a load balancer and more operational work, and it doesn’t help if one database is the bottleneck. For a small system a bigger box is simpler.']}
+]},
+
+stateless:{vb:[420,320],label:'Riya’s requests going through a load balancer to three servers, with Redis',
+objects:[{id:'c',type:'crowd',x:52,y:186,size:2.3,n:7,name:'Users',who:1},{id:'lb',type:'lb',x:142,y:186,w:1.5,h:.6,t:'purple',name:'Load balancer',pb:1},...col('s',250,[96,176,256],1.3,1.6),{id:'redis',type:'box',x:378,y:186,w:1.4,h:1.1,t:'amber',name:'Redis',off:1,pb:1},{id:'jwt',type:'tag',x:74,y:104,off:1}],
+steps:[
+{title:'Riya logs in and S1 remembers her',m:[['Servers','3'],['Session lives in','S1’s memory'],['Riya','logged in'],['Errors','0']],o:{c:{p:'=Riya (dark dot)'},s1:{p:'Riya’s session'}},f:[{p:['c','lb','s1'],t:'ink',r:1.1},{p:['c','lb',['s1','s2','s3']],r:3}],
+ what:'Riya logs in. Her request lands on S1, which checks her password, saves her <b>session</b> (who she is, what’s in her cart) in its own memory, and gives her browser a session ID cookie. So far, so good.',
+ say:'A session is the data that ties requests to a logged-in user. Where it lives decides whether the servers can scale out.',
+ ask:['What is a session?','Server-side data about a logged-in user, found by a session ID that the browser sends in a cookie with every request.']},
+{title:'Her next click lands on S2: “Who are you?”',m:[['Servers','3'],['Session lives in','S1’s memory'],['Riya','!logged out'],['Errors','!random logouts']],o:{s2:{p:'who is Riya?',pt:'red'}},f:[{p:['c','lb','s2'],t:'ink',r:1.1,x:1},{p:['c','lb',['s1','s2','s3']],r:3}],
+ what:'Round robin sends Riya’s next click to S2. S2 has never seen her session ID, because her session exists only in S1’s memory. So S2 treats her as a stranger and sends her to the login page. With many servers this looks like <b>random logouts</b>, the classic sign of sessions stored in server memory.',
+ say:'Random logouts after adding servers mean sessions live in each server’s memory and requests land on servers that don’t know the user.',
+ ask:['You add a load balancer and users get logged out at random. Why?','Sessions are kept in each server’s memory, and the load balancer spreads requests, so the next one lands on a server that doesn’t know the user.']},
+{title:'A patch: sticky sessions',m:[['Load balancer rule','Riya → S1'],['Session lives in','S1’s memory'],['Riya','logged in'],['Errors','0 (for now)']],o:{lb:{p:'=Riya → S1 always'},s2:{p:'',pt:''}},f:[{p:['c','lb','s1'],t:'ink',r:1.1},{p:['c','lb',['s1','s2','s3']],r:3}],
+ what:'One patch is <b>sticky sessions</b> (session affinity): the load balancer sets its own cookie and always sends Riya to S1. The logouts stop, but we have tied each user to one machine.',
+ say:'Sticky sessions hide the problem; they don’t fix it.',
+ ask:['How does a load balancer make sessions sticky?','It sets a cookie naming the server, or hashes the client’s IP, and sends every request with that cookie to the same server.']},
+{title:'Why sticky sessions are a trap',m:[['S1','!crashed'],['Sessions on S1','!lost'],['Riya','!logged out'],['Load','!uneven']],o:{s1:{dead:1,p:'sessions lost'}},f:[{p:['c','lb','s1'],t:'ink',r:1.1},{p:['c','lb',['s2','s3']],r:3}],
+ what:'When S1 crashes or is replaced during a deploy, every session in its memory is gone, so all its users are logged out at once. Load also becomes <b>uneven</b>: busy users stay pinned to old servers, and new servers added by autoscaling get none of the existing users.',
+ say:'With sticky sessions a crash or deploy logs out everyone on that server, and new servers don’t share the load.',
+ ask:['Are sticky sessions ever OK?','For performance, sometimes (a WebSocket connection or a local cache), but never as the only copy of important data.']},
+{title:'The fix: keep sessions in Redis',m:[['Session lives in','Redis (shared)'],['Riya','any server works'],['Servers','stateless'],['Errors','0']],o:{s1:{dead:0,p:''},lb:{p:''},redis:{p:'=Redis: sessions'}},f:[{p:['c','lb',['s1','s2','s3']],t:'ink',r:1.2},{p:['c','lb',['s1','s2','s3']],r:3},{p:[['s1','s2','s3'],'redis'],t:'amber',r:3}],
+ what:'Move sessions out of the servers into a shared, fast store like <b>Redis</b>. Every request carries the session ID, and whichever server gets it looks the session up in Redis (about a millisecond). The servers are now <b>stateless</b>: they keep nothing between requests, so any server can serve any request and losing one logs out nobody. Run Redis with a replica so it isn’t a single point of failure.',
+ say:'I keep servers stateless by moving sessions to Redis, so any server can serve any user and servers can come and go freely.',
+ ask:['Isn’t Redis now a single point of failure?','It can be, so run it with a replica and automatic failover (Sentinel or a managed service), and give sessions a TTL so it can’t fill up.']},
+{title:'Or: carry the session in a signed token (JWT)',m:[['Session lives in','the token'],['Lookups','none'],['Log out early','!hard'],['Token life','~15 min']],o:{redis:false,jwt:{p:'=token in every request'}},f:[{p:['c','lb',['s1','s2','s3']],t:'ink',r:1.2},{p:['c','lb',['s1','s2','s3']],r:3}],
+ what:'Another option is a <b>JWT</b>: after login the server gives Riya a signed token holding her user ID and an expiry time. She sends it with every request and any server can check the signature without looking anything up. The catch: you can’t easily cancel a token before it expires, so keep tokens short-lived (about 15 minutes) and use a refresh token.',
+ say:'JWTs make servers stateless with no lookup, but revoking them is hard, so I use a short expiry plus a refresh token.',
+ ask:['Redis sessions or JWTs?','Redis when you need instant logout or large session data; JWTs when you want no lookups across many services. Many systems use short JWTs plus a server-side refresh token.']},
+{title:'Stateless servers are easy to scale',m:[['Add a server','instant'],['Lose a server','no logouts'],['Deploys','safe'],['State lives in','DB · Redis · S3']],o:{jwt:false,redis:{p:'sessions'}},f:[{p:['c','lb',['s1','s2','s3']],r:4},{p:[['s1','s2','s3'],'redis'],t:'amber',r:3}],
+ what:'Once servers hold no state, the load balancer can use any of them, autoscaling can add or remove servers freely, and rolling deploys replace servers one by one without anyone noticing. State lives in shared stores: the database, Redis and object storage. This is what makes subtopic 6 work.',
+ say:'Stateless app servers plus shared state stores is the standard pattern that makes horizontal scaling and autoscaling work.',
+ ask:['Where do file uploads go if servers are stateless?','Not on the server’s disk: into object storage like S3, with only the file’s URL saved in the database.']}
+]},
+
+db:{vb:[420,320],label:'App servers sending queries to one database, then a pooler, cache and replicas',
+objects:[{id:'c',type:'crowd',x:46,y:182,size:2.2,n:9,name:'Users'},{id:'lb',type:'lb',x:126,y:182,w:1.3,h:.55,t:'purple',name:'LB',pb:1},...col('s',212,[84,128,172,216,260],1.1,1.35,{name:''}),{id:'tg',type:'tag',x:200,y:36},{id:'pool',type:'lb',x:302,y:184,w:.95,h:.6,t:'purple',name:'PgBouncer',off:1},{id:'db',type:'cyl',x:376,y:184,r:1.05,h:1.7,t:'teal',name:'DB'},{id:'cache',type:'box',x:372,y:70,w:1.3,h:1,t:'amber',name:'Cache',off:1},{id:'r1',type:'cyl',x:292,y:286,r:.8,h:1.2,t:'teal',name:'Replica 1',off:1},{id:'r2',type:'cyl',x:392,y:262,r:.8,h:1.2,t:'teal',name:'Replica 2',off:1}],
+steps:[
+{title:'10 app servers, one database',m:[['App servers','10'],['DB CPU','60%'],['DB connections','500'],['p95','120 ms']],o:{tg:{p:'=10 app servers · 50% busy'},db:{p:'CPU 60%'}},f:[{p:['c','lb',S5],r:8},{p:[S5,'db'],t:'teal',r:6}],
+ what:'Pages are getting slower as traffic grows. We have 10 app servers (five drawn) and every one talks to a single database. Each app server keeps a <b>connection pool</b> of 50 open database connections, so the database holds 10 × 50 = 500 connections.',
+ say:'Before adding servers I check where the time goes: app CPU, or waiting on the database.',
+ ask:['How do you tell whether the app tier or the database is the bottleneck?','Compare app server CPU with database CPU, query latency and connection counts. If app servers are idle while waiting on queries, the database is the bottleneck.']},
+{title:'Double the app servers… and it gets slower',m:[['App servers','20'],['DB CPU','!95%'],['DB connections','!1,000'],['p95','!900 ms']],o:{tg:{p:'=20 servers · 25% busy'},db:{t:'red',p:'CPU 95%'}},f:[{p:['c','lb',S5],r:8},{p:[S5,'db'],t:'teal',r:12,x:.2}],
+ what:'We double the app servers to 20 and pages get <b>slower</b>. The app servers were never the problem; they are now only 25% busy. All 20 query the same database, which now holds 20 × 50 = <b>1,000 connections</b>. Each connection costs the database memory and CPU, and more queries running at once fight over CPU, locks and disk. The bottleneck has moved to the database, and every extra app server adds pressure on it.',
+ say:'Adding app servers made it worse because the bottleneck is the shared database: more servers mean more connections and more concurrent queries on one machine.',
+ ask:['You go from 10 to 20 servers and it gets slower. Why?','The database is the bottleneck: 20 servers × 50 pooled connections = 1,000 connections, and the extra concurrency overloads it. Fix the database side with a pooler, a cache and replicas.']},
+{title:'A connection pooler: PgBouncer',m:[['App servers','20'],['DB CPU','!80%'],['DB connections','100'],['p95','400 ms']],o:{pool:{p:''},db:{t:'teal',p:'CPU 80%',pt:'red'}},f:[{p:['c','lb',S5],r:8},{p:[S5,'pool','db'],t:'teal',r:11}],
+ what:'A connection pooler like <b>PgBouncer</b> sits between the app servers and Postgres. The app servers still open 1,000 cheap connections to PgBouncer, but it shares about <b>100 real database connections</b> between them, lending one out only while a query runs. The database stops wasting effort on idle connections.',
+ say:'A pooler like PgBouncer multiplexes thousands of app connections onto a small number of real database connections.',
+ ask:['Why not just raise max_connections on the database?','Each Postgres connection is a process using memory; thousands of them waste RAM and add contention. Fewer, busier connections are faster.']},
+{title:'Cache the hot reads',m:[['Cache hit rate','80%'],['DB CPU','45%'],['DB connections','100'],['p95','150 ms']],o:{cache:{p:'80% hits'},db:{p:'CPU 45%',pt:''}},f:[{p:['c','lb',S5],r:8},{p:[S5,'cache'],t:'amber',r:9},{p:[S5,'pool','db'],t:'teal',r:3}],
+ what:'Most reads ask for the same things again and again: the home page, popular movies, a user’s profile. With <b>cache-aside</b> the app checks Redis first; on a miss it reads the database and stores the result with a TTL. At an 80% hit rate only 1 read in 5 reaches the database, and a cache read takes about a millisecond.',
+ say:'For read-heavy load I add a cache first: an 80% hit rate cuts database reads by 5×.',
+ ask:['What is the risk with caching?','Stale data. Use TTLs, delete or update the key when the data changes, and protect against a stampede when a hot key expires.']},
+{title:'Read replicas for the remaining reads',m:[['Writes','primary'],['Reads','2 replicas'],['Primary CPU','25%'],['p95','90 ms']],o:{db:{p:'primary · writes'},r1:{},r2:{}},f:[{p:['c','lb',S5],r:8},{p:[S5,'cache'],t:'amber',r:7},{p:[S5,['r1','r2']],t:'teal',r:4},{p:[S5,'pool','db'],t:'teal',r:2},{p:['db',['r1','r2']],t:'teal',r:2}],
+ what:'If 90% of traffic is reads, add <b>read replicas</b>: copies of the database that the primary keeps updated. Writes still go to the <b>primary</b>; reads are spread across the replicas. Each replica you add takes another share of the read load.',
+ say:'With 90% reads I’d add a cache and read replicas: writes go to the primary, reads to the replicas.',
+ ask:['Do replicas help a write-heavy system?','No. Every write still lands on the primary and is copied to every replica. To scale writes you need sharding, splitting the data across databases.']},
+{title:'Replication lag: the old profile photo',m:[['Replica lag','!~1 s'],['Saurabh sees','!old photo'],['Writes','primary'],['Reads','replicas']],o:{db:{p:'new photo saved'},r1:{p:'=Replica 1 · stale',pt:'red'}},f:[{p:['c','lb','s1','pool','db'],t:'ink',r:.7},{p:['c','lb','s2','r1'],t:'ink',r:.7,x:1},{p:[S5,['r1','r2']],t:'teal',r:3},{p:['db',['r1','r2']],t:'teal',r:1.5}],
+ what:'Copying changes to replicas takes time: usually milliseconds, sometimes seconds under load. That delay is <b>replication lag</b>. Saurabh uploads a new profile photo and the write goes to the primary. His very next page load reads from Replica 1, which hasn’t received the change yet, so he sees his <b>old photo</b> and thinks the upload failed.',
+ say:'Replicas are eventually consistent: right after a write, a read from a replica can return old data.',
+ ask:['What is replication lag?','The delay between a write landing on the primary and appearing on a replica. Reads from a lagging replica return stale data.']},
+{title:'The fix: read your own writes',m:[['Recent writers read','primary'],['Everyone else','replicas'],['Saurabh sees','new photo'],['Primary CPU','27%']],o:{r1:{p:'',pt:''},db:{p:'primary'}},f:[{p:['c','lb','s1','pool','db'],t:'ink',r:.7},{p:['c','lb','s2','pool','db'],t:'ink',r:.7},{p:[S5,['r1','r2']],t:'teal',r:4},{p:['db',['r1','r2']],t:'teal',r:1.5}],
+ what:'Make sure people always see their <b>own</b> changes. For a few seconds after a user writes, send that user’s reads to the primary (remember the last write time in a cookie or in Redis). Or always read “my own profile” from the primary, or wait until the replica has caught up. Everyone else keeps reading replicas, so the primary stays light.',
+ say:'I’d use read-your-own-writes: route a user’s reads to the primary for a few seconds after they write, and everyone else to replicas.',
+ ask:['Other users still see the old photo for a second. Is that OK?','Usually yes; a profile photo can be eventually consistent for others. Money, bookings and stock levels can’t, so those reads go to the primary.']},
+{title:'Writes still have one home',m:[['Reads','scale with replicas'],['Writes','!one primary'],['Scale writes','up first'],['Then','sharding']],o:{db:{p:'all writes'}},f:[{p:['c','lb',S5],r:8},{p:[S5,'cache'],t:'amber',r:6},{p:[S5,['r1','r2']],t:'teal',r:4},{p:[S5,'pool','db'],t:'teal',r:4}],
+ what:'Caches and replicas scale <b>reads</b>. Every write still goes to one primary, which you can scale up (vertical scaling is common for databases). When writes outgrow the biggest machine, you split the data across several databases by key: <b>sharding</b>, a later lesson.',
+ say:'Reads scale out with caches and replicas; writes scale up first, then out with sharding.',
+ ask:['In what order would you fix a slow database?','Find slow queries and add indexes, add a pooler, cache hot reads, add read replicas, scale up the primary, and shard only when writes demand it.']}
+]},
+
+auto:{vb:[420,252],label:'A fleet of servers growing from 5 to 24 during a traffic spike',
+objects:[{id:'c',type:'crowd',x:46,y:156,size:2.2,n:6,name:'Users'},{id:'wq',type:'queue',x:120,y:162,dx:-12,dy:.9},{id:'lb',type:'lb',x:154,y:156,w:1.4,h:.6,t:'purple',name:'LB',pb:1},...FL,{id:'tg',type:'tag',x:296,y:40}],
+steps:[
+{title:'Normal evening: 5 servers at 60%',m:[['Time','9:30 PM'],['Requests/s','3,000'],['Servers','5 ready'],['Errors','0']],o:fleet(5,0,'blue',{c:{n:5},wq:{n:0},tg:{p:'=5 servers · 60% busy'},lb:{p:''}}),f:[{p:['c','lb','@f'],r:6}],
+ what:'An <b>autoscaler</b> keeps the fleet the right size. We use <b>target tracking</b>: keep average CPU near 65%. At 3,000 requests a second that needs ceil(3,000 ÷ 650) = 5 servers. We also set a minimum (2, for safety) and a maximum (100, to cap the cost).',
+ say:'I’d autoscale on a target, average CPU around 60–70%, with a minimum for availability and a maximum for cost.',
+ ask:['Which metric should you autoscale on?','CPU or requests per server for web servers, and queue length for background workers. Memory is a poor signal because apps rarely give it back.']},
+{title:'The final ends: traffic jumps 5×',m:[['Time','10:00 PM'],['Requests/s','!15,000'],['Servers','5 ready'],['Errors','!67%']],o:fleet(5,0,'red',{c:{n:14},tg:{p:'=5 servers · overloaded',pt:'red'}}),f:[{p:['c','lb','@f'],r:14,x:.6}],
+ what:'The cricket final ends and everyone opens the app at once: <b>15,000 requests a second</b>, five times normal, within two minutes. Five servers can handle about 5,000, so about two-thirds of requests fail. The autoscaler sees CPU at 100% and asks for 24 servers (15,000 ÷ 650 = 23.1, rounded up).',
+ say:'Autoscaling reacts after the spike starts; it can’t add capacity instantly.',
+ ask:['Why can’t autoscaling handle a sudden spike on its own?','It only reacts after the metrics rise, and new servers take minutes to boot and warm up. During that gap the old servers take the whole spike.']},
+{title:'19 new servers are still booting',m:[['Time','10:01 PM'],['Requests/s','!15,000'],['Servers','5 ready · 19 booting'],['Errors','!67%']],o:fleet(5,19,'red',{tg:{p:'=19 booting: 2–5 min',pt:'gray'}}),
+ what:'The 19 new servers are starting: create the machine, boot the operating system, start the app, load the code, open database connections and warm the caches. That <b>cold start</b> takes 2–5 minutes, and a server only gets traffic once its readiness check passes. Until then the first five carry everything and users keep seeing errors.',
+ say:'A new server needs minutes to boot and warm up, so reactive autoscaling always lags a sudden spike.',
+ ask:['How can new servers start faster?','Pre-built machine images or containers, a smaller app, a warm pool of pre-booted servers, and lazy cache warming.']},
+{title:'Four minutes later: caught up',m:[['Time','10:04 PM'],['Requests/s','15,000'],['Servers','24 ready'],['Errors','0']],o:fleet(24,0,'blue',{tg:{p:'=24 servers · 62% busy',pt:''}}),f:[{p:['c','lb','@f'],r:14}],
+ what:'All 24 servers are ready and each runs at about 62%. The system is healthy again, but thousands of users saw errors for <b>four minutes</b> at the most important moment of the night. For a known spike, reacting is too late.',
+ say:'Reactive scaling recovers, but only after users have already been hurt.',
+ ask:['What do those four minutes cost the business?','Failed bookings and payments, angry users, support tickets, and a flood of retry traffic. That is why known events get pre-scaled.']},
+{title:'Fix 1: pre-scale before known events',m:[['Time','9:40 PM'],['Requests/s','3,000'],['Servers','24 ready early'],['Errors at 10 PM','0']],o:fleet(24,0,'blue',{c:{n:5},tg:{p:'=scheduled: 24 from 9:40'}}),f:[{p:['c','lb','@f'],r:6}],
+ what:'The match end time is known, so we don’t wait for the metrics. A <b>scheduled scaling</b> rule raises the minimum to 24 servers at 9:40, <b>15–20 minutes early</b>, leaving time to boot and warm up. When the crowd arrives at 10:00 the capacity is already there. Afterwards, target tracking brings the fleet back down.',
+ say:'For predictable spikes like a match ending or a sale starting, I pre-scale on a schedule 15–20 minutes before.',
+ ask:['What if the spike can’t be predicted?','Keep more headroom and a warm pool, scale on a faster signal (requests per second or queue length), and protect the system with a waiting room or rate limiting.']},
+{title:'Fix 2: protect the system while it scales',m:[['Arriving','!15,000/s'],['Let in','10,000/s'],['In the waiting room','5,000/s'],['Errors','0']],o:fleet(10,14,'blue',{c:{n:14},wq:{n:4},lb:{p:'waiting room on'},tg:{p:'=10 ready · 14 booting'}}),f:[{p:['c','lb','@f'],r:11}],
+ what:'When traffic outruns capacity, slow down instead of falling over. A <b>waiting room</b> lets extra users queue (“you’re in line”), <b>rate limiting</b> rejects excess requests quickly, and <b>graceful degradation</b> switches off non-essential features (recommendations, animations) to save capacity for the main action. Users wait a little, nobody gets an error page, and the system stays up while new servers come online.',
+ say:'While capacity catches up I’d protect the core with a waiting room, rate limits and degraded features, so the system slows down instead of crashing.',
+ ask:['Waiting room or rate limiting: which is kinder to users?','A waiting room for high-value actions like booking tickets; rate limiting with fast 429 responses to protect APIs from overload and abuse.']},
+{title:'After the match: scale in slowly',m:[['Time','10:30 PM'],['Requests/s','4,000'],['Servers','24 → 23, one at a time'],['Cooldown','5 min']],o:Object.assign(fleet(23,0,'blue',{c:{n:6},wq:{n:0},lb:{p:''},tg:{p:'=draining one server'}}),{f24:{g:1,dead:0}}),f:[{p:['c','lb','@f'],r:7}],
+ what:'Traffic drops to 4,000 a second, so we need fewer servers, but we remove them <b>slowly</b>: one at a time with a <b>cooldown</b> (say 5 minutes) between steps. Traffic often bounces back (the trophy ceremony!), and removing servers too fast means booting them again a minute later: that is <b>flapping</b>. A server being removed is first <b>drained</b>: it gets no new requests and finishes the ones in flight before it shuts down.',
+ say:'Scale out fast and in slowly: scaling up late causes errors, scaling down late only costs a bit of money.',
+ ask:['Why scale down slowly but up fast?','Too little capacity means errors for users; too much only costs money. A slow scale-in with a cooldown prevents flapping, and draining avoids cutting users off mid-request.']}
+]},
+
+ladder:{vb:[420,320],label:'A system growing from one server to a load-balanced fleet with a cache and replicas',
+objects:[{id:'c',type:'crowd',x:44,y:184,size:2.2,n:4,name:'Users'},{id:'lb',type:'lb',x:126,y:184,w:1.3,h:.55,t:'purple',name:'LB',off:1,pb:1},{id:'one',type:'server',x:236,y:196,w:1.8,h:2,name:'App + DB'},{id:'app',type:'server',x:222,y:186,w:1.35,h:1.6,name:'App server',off:1},...col('s',216,[84,132,180,228],1.15,1.4,{name:'',off:1}),{id:'tg',type:'tag',x:216,y:36,off:1},{id:'redis',type:'box',x:362,y:72,w:1.3,h:1,t:'amber',name:'Redis',off:1,pb:1},{id:'db',type:'cyl',x:370,y:190,r:1.05,h:1.7,t:'teal',name:'DB',off:1},{id:'r1',type:'cyl',x:300,y:288,r:.8,h:1.2,t:'teal',name:'Replica 1',off:1},{id:'r2',type:'cyl',x:392,y:262,r:.8,h:1.2,t:'teal',name:'Replica 2',off:1}],
+steps:[
+{title:'1. One server does everything',m:[['Users','10K/day'],['Requests/s','50'],['p95','80 ms'],['Errors','0']],o:{one:{}},f:[{p:['c','one'],r:2}],
+ what:'Every design starts small: one machine runs the web app and the database together. It is cheap and simple, and it is the right design until it isn’t.',
+ say:'I’d start with one server running the app and the database: simple and cheap.',
+ ask:['When does this stop working?','When the server runs out of CPU, memory or disk, or when you can’t afford downtime from a single machine.']},
+{title:'2. Measure: find the bottleneck',m:[['Users','100K/day'],['Requests/s','500'],['p95','!900 ms'],['Errors','0']],o:{c:{n:8},one:{t:'red',p:'CPU 92%'}},f:[{p:['c','one'],r:6}],
+ what:'Traffic grows and pages slow down. Before changing anything, measure: CPU, memory, disk, slow queries, p95 latency. Fix the actual bottleneck, not a guess.',
+ say:'First I’d measure to find the real bottleneck.',
+ ask:['Which latency number do you watch?','p95 or p99, not the average: the slowest requests are the ones users complain about.']},
+{title:'3. Scale up',m:[['Users','100K/day'],['Requests/s','500'],['p95','150 ms'],['Errors','0']],o:{one:{w:2.3,d:2.3,h:2.5,t:'blue',p:'bigger machine'}},
+ what:'The quickest fix is a bigger machine. No code changes. It buys time while you plan the next steps.',
+ say:'Scale up first: quick, and no code changes.',
+ ask:['What are its limits?','A hard ceiling, rising cost, still a single point of failure, and downtime to resize.']},
+{title:'4. Split the app and the database',m:[['Users','500K/day'],['Requests/s','1,500'],['p95','120 ms'],['Errors','0']],o:{c:{n:10},one:false,app:{},db:{}},f:[{p:['c','app','db'],r:7}],
+ what:'Move the database to its own machine. Each can now be sized and tuned for its job: app servers need CPU, the database needs memory and fast disks.',
+ say:'Separate the app tier from the data tier so each can scale on its own.',
+ ask:['Why does splitting help?','They stop competing for CPU and memory, and you can scale each one separately.']},
+{title:'5. Make the app servers stateless',m:[['Users','500K/day'],['Requests/s','1,500'],['p95','120 ms'],['Errors','0']],o:{app:{p:'stateless'},redis:{p:'sessions'}},f:[{p:['c','app','db'],r:7},{p:['app','redis'],t:'amber',r:4}],
+ what:'Move sessions into Redis (or use JWTs) so the app server keeps nothing between requests. This is the step that makes adding servers possible.',
+ say:'Make the servers stateless before scaling out.',
+ ask:['What happens if you skip this step?','Random logouts as soon as a load balancer spreads requests across servers.']},
+{title:'6. Scale out behind a load balancer',m:[['Users','2M/day'],['Requests/s','6,000'],['p95','100 ms'],['Errors','0']],o:{c:{n:12},app:false,lb:{},s1:{},s2:{},s3:{},s4:{},tg:{p:'=10 app servers (N+1)'}},f:[{p:['c','lb',['s1','s2','s3','s4']],r:10},{p:[['s1','s2','s3','s4'],'db'],t:'teal',r:6},{p:[['s1','s2','s3','s4'],'redis'],t:'amber',r:4}],
+ what:'Add a load balancer and several identical app servers, with health checks and N+1 spare capacity: 6,000 ÷ 700 = 8.6 → 9, plus 1 spare = 10 (four are drawn). Make the load balancer itself redundant.',
+ say:'Scale out with a redundant load balancer, health checks and N+1 servers.',
+ ask:['How many servers for 6,000/s at 1,000/s each?','6,000 ÷ 700 = 8.6, so 9 for the load, plus 1 spare = 10.']},
+{title:'7. The database becomes the bottleneck',m:[['Users','5M/day'],['Requests/s','15,000'],['p95','!800 ms'],['Errors','!2%']],o:{c:{n:14},tg:{p:'=20 app servers'},db:{t:'red',p:'CPU 95%'}},f:[{p:['c','lb',['s1','s2','s3','s4']],r:12},{p:[['s1','s2','s3','s4'],'db'],t:'teal',r:12,x:.15},{p:[['s1','s2','s3','s4'],'redis'],t:'amber',r:4}],
+ what:'App servers now scale easily, so the single database takes the strain: too many connections and too many queries. Adding more app servers makes it worse.',
+ say:'The bottleneck has moved to the database; more app servers won’t help.',
+ ask:['What is the first fix?','Find slow queries and add indexes, then add a pooler like PgBouncer.']},
+{title:'8. Cache and read replicas',m:[['Users','5M/day'],['Requests/s','15,000'],['p95','90 ms'],['Errors','0']],o:{db:{t:'teal',p:'primary · writes'},redis:{p:'cache + sessions'},r1:{},r2:{}},f:[{p:['c','lb',['s1','s2','s3','s4']],r:12},{p:[['s1','s2','s3','s4'],'redis'],t:'amber',r:9},{p:[['s1','s2','s3','s4'],['r1','r2']],t:'teal',r:4},{p:[['s1','s2','s3','s4'],'db'],t:'teal',r:2}],
+ what:'Cache hot reads in Redis, send the remaining reads to read replicas, and keep writes on the primary. Handle replication lag with read-your-own-writes.',
+ say:'Cache first, then read replicas, with read-your-own-writes for users who just changed something.',
+ ask:['What if writes are the problem?','Scale up the primary, then shard the data across several databases.']},
+{title:'9. Autoscale and pre-scale',m:[['Users','5M/day + spikes'],['Servers','10–100, auto'],['p95','90 ms'],['Errors','0']],o:{tg:{p:'=autoscale 10–100 · pre-scale'},s4:{g:1}},f:[{p:['c','lb',['s1','s2','s3','s4']],r:12},{p:[['s1','s2','s3','s4'],'redis'],t:'amber',r:9},{p:[['s1','s2','s3','s4'],['r1','r2']],t:'teal',r:4},{p:[['s1','s2','s3','s4'],'db'],t:'teal',r:2}],
+ what:'Let the fleet grow and shrink with traffic: target 60–70% CPU with a minimum and maximum, pre-scale before known spikes, scale in slowly, and protect the system with a waiting room or rate limits. The dashed server is a new one booting.',
+ say:'Autoscale on a utilisation target, pre-scale known spikes, and scale in slowly.',
+ ask:['What comes after this?','Sharding the database, a CDN for static files, and multiple regions: later lessons.']}
+]}
+};
+
+const QA=[
+{g:'Load, queueing and headroom',q:'A server can finish 1,000 requests/s and 2,000 arrive. What happens?',a:'1,000 a second are served and the other 1,000 queue, so the queue grows by 1,000 every second. Waits climb until requests time out (504 from the load balancer) or are refused when the queue is full (503). Clients retry and make it worse. Shed load fast, add capacity, keep headroom.'},
+{g:'Load, queueing and headroom',q:'Is running a server at 90% busy safe?',a:'No. Waiting grows like busy ÷ (1 − busy), about 9× the work time at 90%, so p95 latency is already poor and any spike or failure tips it over. Plan peak at 60–70%.'},
+{g:'Load, queueing and headroom',q:'What is headroom, and how much do you keep?',a:'Spare capacity above expected peak, kept for bursts, retries, deploys and losing a server, usually 30–40%. In practice: plan each server at 60–70% busy at peak.'},
+{g:'Load, queueing and headroom',q:'Each server handles 1,000 requests/s, you keep 30% headroom, and peak is 14,000/s. How many servers?',a:'Plan each server at 700/s: 14,000 ÷ 700 = 20 for the load, plus 1 spare so one failure doesn’t overload the rest: 21. Across two zones, round up so either zone can lose a server.'},
+{g:'Load, queueing and headroom',q:'6,000 requests/s, each server safe at 700/s. How many servers?',a:'6,000 ÷ 700 = 8.6, so 9 for the load, plus 1 spare (N+1) = 10.'},
+{g:'Scale up vs scale out',q:'What is the difference between vertical and horizontal scaling? Give one advantage of each.',a:'Vertical scaling means moving to a bigger machine (more CPU, memory, disk); horizontal scaling means adding more machines behind a load balancer. Vertical needs no code changes, so it is the fastest first move. Horizontal has no hard ceiling, and if one machine dies the others keep serving.'},
+{g:'Scale up vs scale out',q:'Why scale vertically first, and when do you stop?',a:'It is the fastest fix with no code changes. Stop when you hit the ceiling (the biggest machine), when the cost climbs too steeply, or when you can’t accept a single point of failure and downtime on every resize.'},
+{g:'Scale up vs scale out',q:'Everything sits behind one load balancer. What happens if it dies, and how do you design around it?',a:'Every request fails even though the servers are healthy. Run two load balancers sharing a floating IP with heartbeats; if the active one stops responding, the passive one takes the IP within seconds. In the cloud use a managed load balancer (AWS ELB), which is already redundant, plus DNS routing across regions at global scale.'},
+{g:'Scale up vs scale out',q:'Round robin or least connections?',a:'Round robin is simple and fine when requests cost about the same. Least connections suits uneven or long requests (uploads, WebSockets) because it sends new work to the least busy server.'},
+{g:'Stateless servers and sessions',q:'You add a load balancer and five servers, and users get logged out at random. Why, and how do you fix it?',a:'Sessions live in each server’s memory and the load balancer spreads requests, so the next request lands on a server that doesn’t know the user. Move sessions to Redis (with a replica) or use signed JWTs, so any server can handle any request.'},
+{g:'Stateless servers and sessions',q:'Why are sticky sessions bad?',a:'A crash or deploy logs out everyone on that server, load becomes uneven because users stay pinned, and new servers added by autoscaling get none of the existing users. Keep sessions in a shared store instead.'},
+{g:'Stateless servers and sessions',q:'How do you deploy a new version to 20 servers without downtime?',a:'A rolling deploy behind the load balancer: take a few servers out (drain them), update them, wait for their readiness checks, put them back, and repeat. This only works because the servers are stateless. Blue-green and canary releases come in a later lesson.'},
+{g:'The database',q:'You double the app servers from 10 to 20 and the site gets even slower. Why?',a:'The shared database is the bottleneck. 20 servers × 50 pooled connections = 1,000 connections, which cost the database memory and CPU, and more concurrent queries fight over CPU, locks and disk. Fix the database side: a pooler like PgBouncer, a cache for repeated reads, and read replicas, not more app servers.'},
+{g:'The database',q:'90% of traffic is reads and the database is overloaded. What do you do?',a:'Cache hot reads first (an 80% hit rate removes 4 of every 5 reads), then add read replicas for the rest, keep writes on the primary, and handle replication lag with read-your-own-writes.'},
+{g:'The database',q:'A user uploads a new profile photo but still sees the old one. Why, and how do you fix it?',a:'Replication lag: the write went to the primary, but the next read hit a replica that hadn’t caught up. Use read-your-own-writes: for a few seconds after a write, send that user’s reads to the primary.'},
+{g:'The database',q:'Can you scale a database horizontally?',a:'Reads, yes: caches and read replicas. Writes need sharding (splitting data across databases by key), which is complex, so databases are usually scaled up first.'},
+{g:'Autoscaling and spikes',q:'A cricket final ends and traffic jumps 5× in two minutes. Autoscaling is on, but users get errors for a few minutes. Why, and what would you do?',a:'Autoscaling reacts only after the spike starts, and new servers need 2–5 minutes to boot and warm up, so the old servers take the whole spike. The end time is known, so pre-scale on a schedule 15–20 minutes before. Keep a warm pool, and protect the system with a waiting room, rate limiting and degraded features, so it slows down instead of crashing while servers come up.'},
+{g:'Autoscaling and spikes',q:'After the match, traffic drops. Why scale down slowly but up fast?',a:'Traffic often bounces back (the trophy ceremony), and removing servers too fast means paying the boot delay again: that is flapping, and a cooldown prevents it. Servers being removed are drained so in-flight requests finish. Scaling up late means errors for users; scaling down late only costs a bit of money.'},
+{g:'Autoscaling and spikes',q:'Which metric would you autoscale a web tier on? A queue worker?',a:'Web tier: average CPU or requests per server, aiming for 60–70%. Queue workers: queue length or the age of the oldest message. Memory is a poor signal because apps rarely release it.'},
+{g:'Autoscaling and spikes',q:'Your autoscaler keeps adding and removing servers every few minutes. What is wrong?',a:'It is flapping: the scale-out and scale-in thresholds are too close, there is no cooldown, or it reacts to a noisy metric. Add a cooldown, widen the gap between thresholds, scale in one server at a time, and use a smoothed metric.'}
+];
+
+ISO.start({scenes:SCENES,qa:QA});
+
+/* ---------- calculator ---------- */
+const $=id=>document.getElementById(id),fmt=n=>n.toLocaleString('en-IN');
+function calc(){
+ const peak=Math.max(0,+$('cPeak').value||0),per=Math.max(1,+$('cPer').value||1),t=+$('cTarget').value,spare=+$('cSpare').value;
+ $('cTOut').textContent=t+'%';
+ const safe=per*t/100,base=Math.ceil(peak/safe-1e-9),total=Math.max(1,base+spare);
+ $('cOut').textContent=fmt(total);
+ $('cMath').textContent='ceil('+fmt(peak)+' ÷ '+fmt(safe)+') = '+fmt(base)+' for the load'+(spare?', + '+spare+' spare = '+fmt(total):'')+'.';
+ const norm=peak/(total*per)*100;$('cNorm').textContent='At peak each server runs at '+norm.toFixed(0)+'% busy.';
+ if(total>1){const one=peak/((total-1)*per)*100,ok=one<=t+.01;$('cFail').innerHTML='If one server dies, the rest run at '+one.toFixed(0)+'%: <span class="'+(ok?'ok':'no')+'">'+(ok?'still within your '+t+'% target':'above your '+t+'% target, so add a spare')+'</span>.'}else $('cFail').textContent='With one server, a failure means a full outage.';
+ const show=Math.min(total,60);$('cFleet').innerHTML=Array.from({length:show},(_,i)=>'<i class="'+(i>=base?'sp':'')+'"></i>').join('')+(total>60?'<span style="color:#a7a196;font-size:14px;margin-left:6px">+'+fmt(total-60)+' more</span>':'')}
+['cPeak','cPer','cTarget','cSpare'].forEach(id=>$(id).addEventListener('input',calc));
+document.querySelectorAll('[data-p]').forEach(b=>b.addEventListener('click',()=>{const [a,c,t,s]=b.dataset.p.split(',');$('cPeak').value=a;$('cPer').value=c;$('cTarget').value=t;$('cSpare').value=s;calc()}));
+calc();
+
+}
+</script>
+</body>
+</html>
